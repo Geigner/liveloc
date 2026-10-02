@@ -1,1 +1,233 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>מיקום עוקב</title>
+    <!-- טעינת ספריית מפות גוגל -->
+    <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f4f4f9; color: #333; }
+        .container { max-width: 600px; margin: 40px auto; background: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); text-align: center; }
+        #map-container { width: 100%; height: 100vh; display: none; }
+        #dashboard { display: none; padding: 15px; max-width: 900px; margin: 0 auto; }
+        input, select, button { width: 100%; padding: 12px; margin: 10px 0; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        button.stop { background: #dc3545; }
+        button.stop:hover { background: #a71d2a; }
+        .user-card { background: white; padding: 15px; margin-bottom: 10px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
+    </style>
+</head>
+<body>
 
+    <!-- מסך משדר (למי שנמצא בתנועה) -->
+    <div id="sender-screen" class="container" style="display:none;">
+        <h2>שידור מיקום חי</h2>
+        <p>התבקשת לשתף מיקום עד להגעתך.</p>
+        <input type="text" id="user-name" placeholder="הכנס את שמך (אופציונלי)" />
+        <label>בחר משך זמן שיתוף:</label>
+        <select id="duration">
+            <option value="30">30 דקות</option>
+            <option value="60" selected>שעה אחת</option>
+            <option value="120">שעתיים</option>
+            <option value="360">6 שעות</option>
+        </select>
+        <button id="start-btn" onclick="startTracking()">התחל שידור מיקום</button>
+        <button id="stop-btn" class="stop" onclick="stopTracking()" style="display:none;">עצור שידור</button>
+        <p id="status-msg" style="margin-top: 15px; font-weight: bold;"></p>
+    </div>
+
+    <!-- מסך צפייה (עבורך - מנהל המערכת) -->
+    <div id="dashboard">
+        <h2>מפת מעקבים פעילים</h2>
+        <div id="users-list">טוען משתמשים...</div>
+        <div id="map" style="width: 100%; height: 500px; border-radius: 12px; margin-top: 20px;"></div>
+    </div>
+
+    <script>
+        const SCRIPT_URL = "YOUR_APPS_SCRIPT_URL_HERE"; // להדביק כאן את הכתובת מ-Apps Script
+        const urlParams = new URLSearchParams(window.location.search);
+        const trackerId = urlParams.get('id');
+
+        if (trackerId) {
+            // אם יש מזהה בקישור -> מצב משדר
+            document.getElementById('sender-screen').style.display = 'block';
+            checkExistingSession();
+        } else {
+            // אם אין מזהה בקישור -> מצב צפייה (דשבורד שלך)
+            document.getElementById('dashboard').style.display = 'block';
+            initMap();
+        }
+
+        // --- פונקציות צד משדר ---
+        let watchId = null;
+        let expiryTimer = null;
+
+        function checkExistingSession() {
+            if (localStorage.getItem('tracking_' + trackerId) === 'true') {
+                document.getElementById('start-btn').style.display = 'none';
+                document.getElementById('stop-btn').style.display = 'block';
+                document.getElementById('user-name').disabled = true;
+                document.getElementById('duration').disabled = true;
+                document.getElementById('status-msg').innerText = "השידור פעיל ברקע...";
+                startWatchLoop();
+            }
+        }
+
+        function startTracking() {
+            if (!navigator.geolocation) {
+                alert("הדפדפן שלך אינו תומך בשירותי מיקום.");
+                return;
+            }
+
+            const name = document.getElementById('user-name').value || "משתמש אנונימי";
+            const durationMins = parseInt(document.getElementById('duration').value);
+            const expiresAt = new Date().getTime() + (durationMins * 60 * 1000);
+
+            localStorage.setItem('tracking_' + trackerId, 'true');
+            localStorage.setItem('expires_' + trackerId, expiresAt);
+            localStorage.setItem('name_' + trackerId, name);
+
+            document.getElementById('start-btn').style.display = 'none';
+            document.getElementById('stop-btn').style.display = 'block';
+            document.getElementById('user-name').disabled = true;
+            document.getElementById('duration').disabled = true;
+
+            startWatchLoop();
+        }
+
+        function startWatchLoop() {
+            document.getElementById('status-msg').innerText = "משדר מיקום בזמן אמת...";
+            
+            // שליחה ראשונה מידית
+            sendCurrentPosition();
+
+            // שליחה כל 10 שניות ברקע
+            watchId = setInterval(() => {
+                const expiresAt = parseInt(localStorage.getItem('expires_' + trackerId));
+                if (new Date().getTime() > expiresAt) {
+                    stopTracking();
+                    alert("פג תוקף זמן השיתוף.");
+                    return;
+                }
+                sendCurrentPosition();
+            }, 10000);
+        }
+
+        function sendCurrentPosition() {
+            navigator.geolocation.getCurrentPosition(position => {
+                const data = {
+                    action: "update",
+                    id: trackerId,
+                    name: localStorage.getItem('name_' + trackerId),
+                    lat: position.coords.latitude,
+                    lng: position.coords.longitude,
+                    expiresAt: parseInt(localStorage.getItem('expires_' + trackerId))
+                };
+
+                fetch(SCRIPT_URL, {
+                    method: "POST",
+                    mode: "no-cors",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(data)
+                }).catch(err => console.error(err));
+            }, error => {
+                document.getElementById('status-msg').innerText = "שגיאה באיתור מיקום: ודא שאישור ה-GPS פעיל.";
+            }, { enableHighAccuracy: true });
+        }
+
+        function stopTracking() {
+            if (watchId) clearInterval(watchId);
+            
+            fetch(SCRIPT_URL, {
+                method: "POST",
+                mode: "no-cors",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "stop", id: trackerId })
+            });
+
+            localStorage.removeItem('tracking_' + trackerId);
+            localStorage.removeItem('expires_' + trackerId);
+            localStorage.removeItem('name_' + trackerId);
+
+            document.getElementById('start-btn').style.display = 'block';
+            document.getElementById('stop-btn').style.display = 'none';
+            document.getElementById('user-name').disabled = false;
+            document.getElementById('duration').disabled = false;
+            document.getElementById('status-msg').innerText = "השידור הופסק.";
+        }
+
+
+        // --- פונקציות צד צפייה (הדשבורד שלך) ---
+        let map;
+        let markers = {};
+
+        function initMap() {
+            map = new google.maps.Map(document.getElementById('map'), {
+                center: { lat: 32.7, lng: 35.3 }, // מרכז ישראל בקירוב
+                zoom: 9
+            });
+
+            fetchActiveUsers();
+            setInterval(fetchActiveUsers, 10000); // רענון נתונים כל 10 שניות
+        }
+
+        function fetchActiveUsers() {
+            fetch(SCRIPT_URL)
+                .then(response => response.json())
+                .then(users => {
+                    const listContainer = document.getElementById('users-list');
+                    if (users.length === 0) {
+                        listContainer.innerHTML = "<p>אין כרגע משתמשים פעילים המשדרים מיקום.</p>";
+                        clearMarkers();
+                        return;
+                    }
+
+                    let html = "<h3>משתמשים פעילים כרגע:</h3>";
+                    let activeIds = [];
+
+                    users.forEach(user => {
+                        activeIds.push(user.id);
+                        html += `<div class="user-card"><span><b>${user.name}</b> (מזהה: ${user.id})</span><span>עודכן לאחרונה</span></div>`;
+                        
+                        updateMarker(user);
+                    });
+
+                    listContainer.innerHTML = html;
+                    removeStaleMarkers(activeIds);
+                })
+                .catch(err => console.error("שגיאה בטעינת נתונים:", err));
+        }
+
+        function updateMarker(user) {
+            const pos = { lat: user.lat, lng: user.lng };
+            if (markers[user.id]) {
+                markers[user.id].setPosition(pos);
+            } else {
+                markers[user.id] = new google.maps.Marker({
+                    position: pos,
+                    map: map,
+                    title: user.name
+                });
+            }
+        }
+
+        function clearMarkers() {
+            for (let id in markers) {
+                markers[id].setMap(null);
+                delete markers[id];
+            }
+        }
+
+        function removeStaleMarkers(activeIds) {
+            for (let id in markers) {
+                if (!activeIds.includes(id)) {
+                    markers[id].setMap(null);
+                    delete markers[id];
+                }
+            }
+        }
+    </script>
+</body>
+</html>
